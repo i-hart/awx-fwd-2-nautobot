@@ -1,1 +1,274 @@
+---
+# Ansible Playbook: Export Forward Networks data to Nautobot
+# This playbook retrieves data from Forward Networks using NQE queries
+# and syncs it to Nautobot via the Nautobot API
 
+- name: Sync Forward Networks to Nautobot
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - networktocode.nautobot
+
+  vars:
+    # Forward Networks Configuration
+    forward_host: "{{ lookup('env', 'FORWARD_HOST') | default('https://fwd.app') }}"
+    forward_auth: "{{ lookup('env', 'FORWARD_AUTH') }}"  # Basic auth token
+    forward_network_id: "{{ lookup('env', 'FORWARD_NETWORK_ID') }}"
+    forward_timeout: 60
+    nqe_limit: 1000
+
+    # Custom NQE Query IDs (override these in AWX survey or extra_vars)
+    nqe_locations_query: "{{ lookup('env', 'NQE_LOCATIONS_QUERY') }}"
+    nqe_manufacturers_query: "{{ lookup('env', 'NQE_MANUFACTURERS_QUERY') }}"
+    nqe_device_types_query: "{{ lookup('env', 'NQE_DEVICE_TYPES_QUERY') }}"
+    nqe_devices_query: "{{ lookup('env', 'NQE_DEVICES_QUERY') }}"
+    nqe_interfaces_query: "{{ lookup('env', 'NQE_INTERFACES_QUERY') }}"
+
+    # Nautobot Configuration
+    nautobot_url: "{{ lookup('env', 'NAUTOBOT_URL') }}"
+    nautobot_token: "{{ lookup('env', 'NAUTOBOT_TOKEN') }}"
+    nautobot_validate_certs: true
+
+    # Sync Options
+    sync_locations: true
+    sync_manufacturers: true
+    sync_device_types: true
+    sync_devices: true
+    sync_interfaces: true
+    allow_deletes: false
+    dry_run: false
+
+  tasks:
+    - name: Verify required environment variables
+      assert:
+        that:
+          - forward_auth is defined and forward_auth != ""
+          - forward_network_id is defined and forward_network_id != ""
+          - nautobot_url is defined and nautobot_url != ""
+          - nautobot_token is defined and nautobot_token != ""
+        fail_msg: "Required environment variables are not set"
+
+    # ========================================
+    # LOCATIONS / SITES
+    # ========================================
+    - name: Retrieve locations from Forward Networks
+      uri:
+        url: "{{ forward_host }}/api/networks/{{ forward_network_id }}/nqe/{{ nqe_locations_query }}/run"
+        method: POST
+        headers:
+          Authorization: "Basic {{ forward_auth }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          limit: "{{ nqe_limit }}"
+        timeout: "{{ forward_timeout }}"
+        validate_certs: true
+        status_code: [200, 201]
+      register: forward_locations
+      when: sync_locations and nqe_locations_query != ""
+
+    - name: Parse locations data
+      set_fact:
+        locations_data: "{{ forward_locations.json.data | default([]) }}"
+      when: sync_locations and forward_locations is defined
+
+    - name: Create or update locations in Nautobot
+      networktocode.nautobot.location:
+        url: "{{ nautobot_url }}"
+        token: "{{ nautobot_token }}"
+        name: "{{ item.name }}"
+        location_type: "{{ item.location_type | default('Site') }}"
+        status: "{{ item.status | default('Active') }}"
+        description: "{{ item.description | default('') }}"
+        state: present
+        validate_certs: "{{ nautobot_validate_certs }}"
+      loop: "{{ locations_data }}"
+      when: sync_locations and not dry_run
+      register: locations_result
+
+    # ========================================
+    # MANUFACTURERS
+    # ========================================
+    - name: Retrieve manufacturers from Forward Networks
+      uri:
+        url: "{{ forward_host }}/api/networks/{{ forward_network_id }}/nqe/{{ nqe_manufacturers_query }}/run"
+        method: POST
+        headers:
+          Authorization: "Basic {{ forward_auth }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          limit: "{{ nqe_limit }}"
+        timeout: "{{ forward_timeout }}"
+        validate_certs: true
+        status_code: [200, 201]
+      register: forward_manufacturers
+      when: sync_manufacturers and nqe_manufacturers_query != ""
+
+    - name: Parse manufacturers data
+      set_fact:
+        manufacturers_data: "{{ forward_manufacturers.json.data | default([]) }}"
+      when: sync_manufacturers and forward_manufacturers is defined
+
+    - name: Create or update manufacturers in Nautobot
+      networktocode.nautobot.manufacturer:
+        url: "{{ nautobot_url }}"
+        token: "{{ nautobot_token }}"
+        name: "{{ item.name }}"
+        description: "{{ item.description | default('') }}"
+        state: present
+        validate_certs: "{{ nautobot_validate_certs }}"
+      loop: "{{ manufacturers_data }}"
+      when: sync_manufacturers and not dry_run
+      register: manufacturers_result
+
+    # ========================================
+    # DEVICE TYPES
+    # ========================================
+    - name: Retrieve device types from Forward Networks
+      uri:
+        url: "{{ forward_host }}/api/networks/{{ forward_network_id }}/nqe/{{ nqe_device_types_query }}/run"
+        method: POST
+        headers:
+          Authorization: "Basic {{ forward_auth }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          limit: "{{ nqe_limit }}"
+        timeout: "{{ forward_timeout }}"
+        validate_certs: true
+        status_code: [200, 201]
+      register: forward_device_types
+      when: sync_device_types and nqe_device_types_query != ""
+
+    - name: Parse device types data
+      set_fact:
+        device_types_data: "{{ forward_device_types.json.data | default([]) }}"
+      when: sync_device_types and forward_device_types is defined
+
+    - name: Create or update device types in Nautobot
+      networktocode.nautobot.device_type:
+        url: "{{ nautobot_url }}"
+        token: "{{ nautobot_token }}"
+        model: "{{ item.model }}"
+        manufacturer: "{{ item.manufacturer }}"
+        part_number: "{{ item.part_number | default(omit) }}"
+        u_height: "{{ item.u_height | default(1) }}"
+        is_full_depth: "{{ item.is_full_depth | default(true) }}"
+        state: present
+        validate_certs: "{{ nautobot_validate_certs }}"
+      loop: "{{ device_types_data }}"
+      when: sync_device_types and not dry_run
+      register: device_types_result
+
+    # ========================================
+    # DEVICES
+    # ========================================
+    - name: Retrieve devices from Forward Networks
+      uri:
+        url: "{{ forward_host }}/api/networks/{{ forward_network_id }}/nqe/{{ nqe_devices_query }}/run"
+        method: POST
+        headers:
+          Authorization: "Basic {{ forward_auth }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          limit: "{{ nqe_limit }}"
+        timeout: "{{ forward_timeout }}"
+        validate_certs: true
+        status_code: [200, 201]
+      register: forward_devices
+      when: sync_devices and nqe_devices_query != ""
+
+    - name: Parse devices data
+      set_fact:
+        devices_data: "{{ forward_devices.json.data | default([]) }}"
+      when: sync_devices and forward_devices is defined
+
+    - name: Create or update devices in Nautobot
+      networktocode.nautobot.device:
+        url: "{{ nautobot_url }}"
+        token: "{{ nautobot_token }}"
+        name: "{{ item.name }}"
+        device_type: "{{ item.device_type }}"
+        role: "{{ item.role | default('Unknown') }}"
+        location: "{{ item.location | default(omit) }}"
+        status: "{{ item.status | default('Active') }}"
+        serial: "{{ item.serial | default(omit) }}"
+        asset_tag: "{{ item.asset_tag | default(omit) }}"
+        tenant: "{{ item.tenant | default(omit) }}"
+        platform: "{{ item.platform | default(omit) }}"
+        state: present
+        validate_certs: "{{ nautobot_validate_certs }}"
+      loop: "{{ devices_data }}"
+      when: sync_devices and not dry_run
+      register: devices_result
+
+    # ========================================
+    # INTERFACES
+    # ========================================
+    - name: Retrieve interfaces from Forward Networks
+      uri:
+        url: "{{ forward_host }}/api/networks/{{ forward_network_id }}/nqe/{{ nqe_interfaces_query }}/run"
+        method: POST
+        headers:
+          Authorization: "Basic {{ forward_auth }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          limit: "{{ nqe_limit }}"
+        timeout: "{{ forward_timeout }}"
+        validate_certs: true
+        status_code: [200, 201]
+      register: forward_interfaces
+      when: sync_interfaces and nqe_interfaces_query != ""
+
+    - name: Parse interfaces data
+      set_fact:
+        interfaces_data: "{{ forward_interfaces.json.data | default([]) }}"
+      when: sync_interfaces and forward_interfaces is defined
+
+    - name: Create or update interfaces in Nautobot
+      networktocode.nautobot.device_interface:
+        url: "{{ nautobot_url }}"
+        token: "{{ nautobot_token }}"
+        device: "{{ item.device }}"
+        name: "{{ item.name }}"
+        type: "{{ item.type | default('Other') }}"
+        enabled: "{{ item.enabled | default(true) }}"
+        mtu: "{{ item.mtu | default(omit) }}"
+        mac_address: "{{ item.mac_address | default(omit) }}"
+        description: "{{ item.description | default(omit) }}"
+        mode: "{{ item.mode | default(omit) }}"
+        state: present
+        validate_certs: "{{ nautobot_validate_certs }}"
+      loop: "{{ interfaces_data }}"
+      when: sync_interfaces and not dry_run
+      register: interfaces_result
+
+    # ========================================
+    # REPORTING
+    # ========================================
+    - name: Generate sync summary
+      set_fact:
+        sync_summary:
+          locations: "{{ locations_result.results | default([]) | length }}"
+          manufacturers: "{{ manufacturers_result.results | default([]) | length }}"
+          device_types: "{{ device_types_result.results | default([]) | length }}"
+          devices: "{{ devices_result.results | default([]) | length }}"
+          interfaces: "{{ interfaces_result.results | default([]) | length }}"
+          dry_run: "{{ dry_run }}"
+
+    - name: Display sync summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Forward Networks to Nautobot Sync Complete"
+          - "=========================================="
+          - "Locations synced: {{ sync_summary.locations }}"
+          - "Manufacturers synced: {{ sync_summary.manufacturers }}"
+          - "Device Types synced: {{ sync_summary.device_types }}"
+          - "Devices synced: {{ sync_summary.devices }}"
+          - "Interfaces synced: {{ sync_summary.interfaces }}"
+          - "Dry Run Mode: {{ sync_summary.dry_run }}"
+          - "=========================================="
